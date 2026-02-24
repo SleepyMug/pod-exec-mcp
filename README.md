@@ -1,13 +1,13 @@
-# pod-exec-mcp
+# pod_exec_mcp
 
-Python server built with the standalone `fastmcp` package that executes shell commands in per-session Podman containers based on image `pod-exec-mcp`.
+Python server built with the standalone `fastmcp` package that executes shell commands in per-session Podman containers based on image `pod_exec_mcp_base`.
 
 ## Behavior
 
 - Transport: streamable HTTP only.
 - Startup checks (fail-fast):
   - `podman` binary must exist in `PATH`.
-  - image `pod-exec-mcp` must exist locally.
+  - image `pod_exec_mcp_base` must exist locally.
 - Session runtime:
   - each FastMCP `ctx.session_id` gets its own long-lived container process.
   - container is started with `podman run --rm --init` and sleeps indefinitely.
@@ -30,7 +30,7 @@ uv pip install -e .
 Build the Podman image used by session containers:
 
 ```bash
-pod-exec-mcp-build
+pod_exec_mcp_build
 ```
 
 The build uses a Debian base image with common agent tools preinstalled, including:
@@ -39,7 +39,7 @@ The build uses a Debian base image with common agent tools preinstalled, includi
 ## Run server
 
 ```bash
-MCP_HOST=127.0.0.1 MCP_PORT=8000 pod-exec-mcp
+MCP_HOST=127.0.0.1 MCP_PORT=8000 pod_exec_mcp
 ```
 
 ## Tool contract

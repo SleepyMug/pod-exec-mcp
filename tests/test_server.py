@@ -49,7 +49,7 @@ def _cp(returncode=0, stdout="", stderr=""):
 
 
 def test_startup_assertions_fail_when_podman_missing(server_module, monkeypatch):
-    manager = server_module.SessionContainerManager("pod-exec-mcp")
+    manager = server_module.SessionContainerManager("pod_exec_mcp_base")
     monkeypatch.setattr(server_module.shutil, "which", lambda *_: None)
 
     with pytest.raises(RuntimeError, match="Podman binary was not found"):
@@ -57,7 +57,7 @@ def test_startup_assertions_fail_when_podman_missing(server_module, monkeypatch)
 
 
 def test_startup_assertions_fail_when_image_missing(server_module, monkeypatch):
-    manager = server_module.SessionContainerManager("pod-exec-mcp")
+    manager = server_module.SessionContainerManager("pod_exec_mcp_base")
     monkeypatch.setattr(server_module.shutil, "which", lambda *_: "/usr/bin/podman")
     monkeypatch.setattr(server_module.subprocess, "run", lambda *a, **k: _cp(returncode=1, stderr="not found"))
 
@@ -66,7 +66,7 @@ def test_startup_assertions_fail_when_image_missing(server_module, monkeypatch):
 
 
 def test_exec_command_returns_merged_output_and_retval(server_module, monkeypatch):
-    manager = server_module.SessionContainerManager("pod-exec-mcp")
+    manager = server_module.SessionContainerManager("pod_exec_mcp_base")
 
     fake_handle = server_module.ContainerHandle(
         session_id="abc",

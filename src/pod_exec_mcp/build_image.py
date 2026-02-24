@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-IMAGE_NAME = "pod-exec-mcp"
+IMAGE_NAME = "pod_exec_mcp_base"
 
 CONTAINERFILE = """\
 FROM docker.io/library/debian:trixie

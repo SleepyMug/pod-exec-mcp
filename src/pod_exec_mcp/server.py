@@ -14,7 +14,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 
-IMAGE_NAME = "pod-exec-mcp"
+IMAGE_NAME = "pod_exec_mcp_base"
 STARTUP_TIMEOUT_SECONDS = 15.0
 MANAGED_LABEL = "managed-by=pod-exec-mcp"
 
@@ -206,7 +206,7 @@ class SessionContainerManager:
 
 
 manager = SessionContainerManager(IMAGE_NAME)
-mcp = FastMCP("pod-exec-mcp")
+mcp = FastMCP("pod_exec_mcp")
 
 
 @mcp.tool()
