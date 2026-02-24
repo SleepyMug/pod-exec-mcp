@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pod-exec-mcp"
+version = "0.1.0"
+description = "MCP server that executes shell commands in per-session Podman containers"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastmcp>=2.0.0",
+]
+
+[project.scripts]
+pod-exec-mcp = "pod_exec_mcp.server:main"
+pod-exec-mcp-build = "pod_exec_mcp.build_image:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pod_exec_mcp"]

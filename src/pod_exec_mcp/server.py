@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+import atexit
+import os
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+import weakref
+from dataclasses import dataclass
+from typing import Any
+
+from fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
+
+IMAGE_NAME = "pod-exec-mcp"
+STARTUP_TIMEOUT_SECONDS = 15.0
+MANAGED_LABEL = "managed-by=pod-exec-mcp"
+
+
+@dataclass
+class ContainerHandle:
+    session_id: str
+    name: str
+    process: subprocess.Popen[Any]
+    started_at: float
+
+
+class ShellExecResult(BaseModel):
+    output: str = Field(default="")
+    retval: int
+
+
+class SessionContainerManager:
+    def __init__(self, image_name: str) -> None:
+        self.image_name = image_name
+        self._lock = threading.Lock()
+        self._containers: dict[str, ContainerHandle] = {}
+        self._session_finalizers: dict[str, weakref.finalize] = {}
+
+    def startup_assertions(self) -> None:
+        if shutil.which("podman") is None:
+            raise RuntimeError("Podman binary was not found in PATH")
+
+        exists = subprocess.run(
+            ["podman", "image", "exists", self.image_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if exists.returncode != 0:
+            details = (exists.stderr or exists.stdout).strip()
+            message = f"Required Podman image '{self.image_name}' does not exist"
+            if details:
+                message = f"{message}: {details}"
+            raise RuntimeError(message)
+        self._startup_sweep()
+
+    def get_or_create(self, session_id: str) -> ContainerHandle:
+        with self._lock:
+            existing = self._containers.get(session_id)
+            if existing is not None and existing.process.poll() is None:
+                return existing
+            if existing is not None:
+                self._containers.pop(session_id, None)
+
+            name = self._container_name(session_id)
+            self._force_remove(name)
+            process = subprocess.Popen(
+                [
+                    "podman",
+                    "run",
+                    "--rm",
+                    "--init",
+                    "--name",
+                    name,
+                    "--label",
+                    MANAGED_LABEL,
+                    "-i",
+                    self.image_name,
+                    "/bin/sh",
+                    "-lc",
+                    "while true; do sleep 3600; done",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            handle = ContainerHandle(
+                session_id=session_id,
+                name=name,
+                process=process,
+                started_at=time.time(),
+            )
+            self._wait_until_exec_ready(handle)
+            self._containers[session_id] = handle
+            return handle
+
+    def track_session(self, session_id: str, ctx: Any | None) -> None:
+        if ctx is None:
+            return
+        session_obj = getattr(ctx, "session", None)
+        if session_obj is None:
+            return
+        with self._lock:
+            if session_id in self._session_finalizers:
+                return
+            try:
+                finalizer = weakref.finalize(
+                    session_obj,
+                    self.cleanup_session,
+                    session_id,
+                )
+            except TypeError:
+                return
+            self._session_finalizers[session_id] = finalizer
+
+    def exec_command(self, session_id: str, command: str) -> ShellExecResult:
+        handle = self.get_or_create(session_id)
+        result = subprocess.run(
+            ["podman", "exec", handle.name, "/bin/sh", "-lc", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        return ShellExecResult(output=result.stdout or "", retval=result.returncode)
+
+    def cleanup_session(self, session_id: str) -> None:
+        with self._lock:
+            handle = self._containers.pop(session_id, None)
+            finalizer = self._session_finalizers.pop(session_id, None)
+        if handle is None:
+            if finalizer is not None and finalizer.alive:
+                finalizer.detach()
+            return
+        if finalizer is not None and finalizer.alive:
+            finalizer.detach()
+        self._cleanup_handle(handle)
+
+    def cleanup_all(self) -> None:
+        with self._lock:
+            handles = list(self._containers.values())
+            self._containers.clear()
+        for handle in handles:
+            self._cleanup_handle(handle)
+
+    def _cleanup_handle(self, handle: ContainerHandle) -> None:
+        self._force_remove(handle.name)
+        if handle.process.poll() is None:
+            handle.process.terminate()
+            try:
+                handle.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                handle.process.kill()
+                handle.process.wait(timeout=2)
+
+    def _wait_until_exec_ready(self, handle: ContainerHandle) -> None:
+        deadline = time.time() + STARTUP_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            if handle.process.poll() is not None:
+                raise RuntimeError(
+                    f"Session container exited early: {handle.name}"
+                )
+            probe = subprocess.run(
+                ["podman", "exec", handle.name, "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if probe.returncode == 0:
+                return
+            time.sleep(0.2)
+        raise RuntimeError(f"Timed out waiting for container ready: {handle.name}")
+
+    def _force_remove(self, name: str) -> None:
+        subprocess.run(
+            ["podman", "rm", "-f", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    def _startup_sweep(self) -> None:
+        result = subprocess.run(
+            ["podman", "ps", "-aq", "--filter", f"label={MANAGED_LABEL}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return
+        container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        for container_id in container_ids:
+            self._force_remove(container_id)
+
+    @staticmethod
+    def _container_name(session_id: str) -> str:
+        sanitized = "".join(ch if ch.isalnum() else "-" for ch in session_id)
+        if not sanitized:
+            sanitized = "default"
+        short = uuid.uuid4().hex[:8]
+        return f"pod-exec-mcp-{sanitized[:24]}-{short}".lower()
+
+
+manager = SessionContainerManager(IMAGE_NAME)
+mcp = FastMCP("pod-exec-mcp")
+
+
+@mcp.tool()
+def shell_exec(command: str, ctx: Context) -> ShellExecResult:
+    """Execute a shell command in the calling session container and return output + retval."""
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command must be a non-empty string")
+
+    session_id = getattr(ctx, "session_id", None)
+    print(f'{command} ran with id {session_id}')
+    if not session_id:
+        raise RuntimeError("FastMCP context does not include a session_id")
+    manager.track_session(session_id, ctx)
+    return manager.exec_command(session_id, command)
+
+
+def main() -> None:
+    manager.startup_assertions()
+    atexit.register(manager.cleanup_all)
+
+    host = os.environ.get("MCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("MCP_PORT", "8000"))
+    # Standalone FastMCP reads bind settings from FASTMCP_* environment variables.
+    os.environ["FASTMCP_HOST"] = host
+    os.environ["FASTMCP_PORT"] = str(port)
+
+    # streamable HTTP transport as requested.
+    mcp.run(transport="streamable-http")
+
+
+if __name__ == "__main__":
+    main()
